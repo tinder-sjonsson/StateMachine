@@ -2,68 +2,10 @@ package com.tinder
 
 import java.util.concurrent.atomic.AtomicReference
 
-class StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> private constructor(
-    private val graph: Graph<STATE, EVENT, SIDE_EFFECT>
-) {
-
-    private val stateRef = AtomicReference<STATE>(graph.initialState)
+interface StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> {
 
     val state: STATE
-        get() = stateRef.get()
-
-    fun transition(event: EVENT): Transition<STATE, EVENT, SIDE_EFFECT> {
-        val transition = synchronized(this) {
-            val fromState = stateRef.get()
-            val transition = fromState.getTransition(event)
-            if (transition is Transition.Valid) {
-                stateRef.set(transition.toState)
-            }
-            transition
-        }
-        transition.notifyOnTransition()
-        if (transition is Transition.Valid) {
-            with(transition) {
-                with(fromState) {
-                    notifyOnExit(event)
-                }
-                with(toState) {
-                    notifyOnEnter(event)
-                }
-            }
-        }
-        return transition
-    }
-
-    fun with(init: GraphBuilder<STATE, EVENT, SIDE_EFFECT>.() -> Unit): StateMachine<STATE, EVENT, SIDE_EFFECT> {
-        return create(graph.copy(initialState = state), init)
-    }
-
-    private fun STATE.getTransition(event: EVENT): Transition<STATE, EVENT, SIDE_EFFECT> {
-        for ((eventMatcher, createTransitionTo) in getDefinition().transitions) {
-            if (eventMatcher.matches(event)) {
-                val (toState, sideEffect) = createTransitionTo(this, event)
-                return Transition.Valid(this, event, toState, sideEffect)
-            }
-        }
-        return Transition.Invalid(this, event)
-    }
-
-    private fun STATE.getDefinition() = graph.stateDefinitions
-        .filter { it.key.matches(this) }
-        .map { it.value }
-        .firstOrNull() ?: error("Missing definition for state ${this.javaClass.simpleName}!")
-
-    private fun STATE.notifyOnEnter(cause: EVENT) {
-        getDefinition().onEnterListeners.forEach { it(this, cause) }
-    }
-
-    private fun STATE.notifyOnExit(cause: EVENT) {
-        getDefinition().onExitListeners.forEach { it(this, cause) }
-    }
-
-    private fun Transition<STATE, EVENT, SIDE_EFFECT>.notifyOnTransition() {
-        graph.onTransitionListeners.forEach { it(this) }
-    }
+    fun transition(event: EVENT): Transition<STATE, EVENT, SIDE_EFFECT>
 
     @Suppress("UNUSED")
     sealed class Transition<out STATE : Any, out EVENT : Any, out SIDE_EFFECT : Any> {
@@ -83,16 +25,96 @@ class StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> private construc
         ) : Transition<STATE, EVENT, SIDE_EFFECT>()
     }
 
+    companion object {
+        fun <STATE : Any, EVENT : Any, SIDE_EFFECT : Any> create(
+            init: GraphStateMachine.GraphBuilder<STATE, EVENT, SIDE_EFFECT>.() -> Unit
+        ): StateMachine<STATE, EVENT, SIDE_EFFECT> {
+            return create(null, init)
+        }
+
+        internal fun <STATE : Any, EVENT : Any, SIDE_EFFECT : Any> create(
+            graph: GraphStateMachine.Graph<STATE, EVENT, SIDE_EFFECT>?,
+            init: GraphStateMachine.GraphBuilder<STATE, EVENT, SIDE_EFFECT>.() -> Unit
+        ): StateMachine<STATE, EVENT, SIDE_EFFECT> {
+            return GraphStateMachine(GraphStateMachine.GraphBuilder(graph).apply(init).build())
+        }
+    }
+}
+
+class GraphStateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> internal constructor(
+    private val graph: Graph<STATE, EVENT, SIDE_EFFECT>
+) : StateMachine<STATE, EVENT, SIDE_EFFECT> {
+
+    private val stateRef = AtomicReference<STATE>(graph.initialState)
+
+    override val state: STATE
+        get() = stateRef.get()
+
+    override fun transition(event: EVENT): StateMachine.Transition<STATE, EVENT, SIDE_EFFECT> {
+        val transition = synchronized(this) {
+            val fromState = stateRef.get()
+            val transition = fromState.getTransition(event)
+            if (transition is StateMachine.Transition.Valid) {
+                stateRef.set(transition.toState)
+            }
+            transition
+        }
+        transition.notifyOnTransition()
+        if (transition is StateMachine.Transition.Valid) {
+            with(transition) {
+                with(fromState) {
+                    notifyOnExit(event)
+                }
+                with(toState) {
+                    notifyOnEnter(event)
+                }
+            }
+        }
+        return transition
+    }
+
+    fun with(init: GraphBuilder<STATE, EVENT, SIDE_EFFECT>.() -> Unit): StateMachine<STATE, EVENT, SIDE_EFFECT> {
+        return StateMachine.create(graph.copy(initialState = state), init)
+    }
+
+    private fun STATE.getTransition(event: EVENT): StateMachine.Transition<STATE, EVENT, SIDE_EFFECT> {
+        for ((eventMatcher, createTransitionTo) in getDefinition().transitions) {
+            if (eventMatcher.matches(event)) {
+                val (toState, sideEffect) = createTransitionTo(this, event)
+                return StateMachine.Transition.Valid(this, event, toState, sideEffect)
+            }
+        }
+        return StateMachine.Transition.Invalid(this, event)
+    }
+
+    private fun STATE.getDefinition() = graph.stateDefinitions
+        .filter { it.key.matches(this) }
+        .map { it.value }
+        .firstOrNull() ?: error("Missing definition for state ${this.javaClass.simpleName}!")
+
+    private fun STATE.notifyOnEnter(cause: EVENT) {
+        getDefinition().onEnterListeners.forEach { it(this, cause) }
+    }
+
+    private fun STATE.notifyOnExit(cause: EVENT) {
+        getDefinition().onExitListeners.forEach { it(this, cause) }
+    }
+
+    private fun StateMachine.Transition<STATE, EVENT, SIDE_EFFECT>.notifyOnTransition() {
+        graph.onTransitionListeners.forEach { it(this) }
+    }
+
     data class Graph<STATE : Any, EVENT : Any, SIDE_EFFECT : Any>(
         val initialState: STATE,
         val stateDefinitions: Map<Matcher<STATE, STATE>, State<STATE, EVENT, SIDE_EFFECT>>,
-        val onTransitionListeners: List<(Transition<STATE, EVENT, SIDE_EFFECT>) -> Unit>
+        val onTransitionListeners: List<(StateMachine.Transition<STATE, EVENT, SIDE_EFFECT>) -> Unit>
     ) {
 
         class State<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> internal constructor() {
             val onEnterListeners = mutableListOf<(STATE, EVENT) -> Unit>()
             val onExitListeners = mutableListOf<(STATE, EVENT) -> Unit>()
-            val transitions = linkedMapOf<Matcher<EVENT, EVENT>, (STATE, EVENT) -> TransitionTo<STATE, SIDE_EFFECT>>()
+            val transitions =
+                linkedMapOf<Matcher<EVENT, EVENT>, (STATE, EVENT) -> TransitionTo<STATE, SIDE_EFFECT>>()
 
             data class TransitionTo<out STATE : Any, out SIDE_EFFECT : Any> internal constructor(
                 val toState: STATE,
@@ -119,7 +141,8 @@ class StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> private construc
 
             inline fun <T : Any, reified R : T> any(): Matcher<T, R> = any(R::class.java)
 
-            inline fun <T : Any, reified R : T> eq(value: R): Matcher<T, R> = any<T, R>().where { this == value }
+            inline fun <T : Any, reified R : T> eq(value: R): Matcher<T, R> =
+                any<T, R>().where { this == value }
         }
     }
 
@@ -145,16 +168,23 @@ class StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> private construc
             state(Matcher.any(), init)
         }
 
-        inline fun <reified S : STATE> state(state: S, noinline init: StateDefinitionBuilder<S>.() -> Unit) {
+        inline fun <reified S : STATE> state(
+            state: S,
+            noinline init: StateDefinitionBuilder<S>.() -> Unit
+        ) {
             state(Matcher.eq<STATE, S>(state), init)
         }
 
-        fun onTransition(listener: (Transition<STATE, EVENT, SIDE_EFFECT>) -> Unit) {
+        fun onTransition(listener: (StateMachine.Transition<STATE, EVENT, SIDE_EFFECT>) -> Unit) {
             onTransitionListeners.add(listener)
         }
 
         fun build(): Graph<STATE, EVENT, SIDE_EFFECT> {
-            return Graph(requireNotNull(initialState), stateDefinitions.toMap(), onTransitionListeners.toList())
+            return Graph(
+                requireNotNull(initialState),
+                stateDefinitions.toMap(),
+                onTransitionListeners.toList()
+            )
         }
 
         inner class StateDefinitionBuilder<S : STATE> {
@@ -210,21 +240,6 @@ class StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> private construc
 
             @Suppress("UNUSED") // The unused warning is probably a compiler bug.
             fun S.dontTransition(sideEffect: SIDE_EFFECT? = null) = transitionTo(this, sideEffect)
-        }
-    }
-
-    companion object {
-        fun <STATE : Any, EVENT : Any, SIDE_EFFECT : Any> create(
-            init: GraphBuilder<STATE, EVENT, SIDE_EFFECT>.() -> Unit
-        ): StateMachine<STATE, EVENT, SIDE_EFFECT> {
-            return create(null, init)
-        }
-
-        private fun <STATE : Any, EVENT : Any, SIDE_EFFECT : Any> create(
-            graph: Graph<STATE, EVENT, SIDE_EFFECT>?,
-            init: GraphBuilder<STATE, EVENT, SIDE_EFFECT>.() -> Unit
-        ): StateMachine<STATE, EVENT, SIDE_EFFECT> {
-            return StateMachine(GraphBuilder(graph).apply(init).build())
         }
     }
 }
