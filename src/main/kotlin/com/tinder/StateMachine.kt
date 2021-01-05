@@ -73,10 +73,6 @@ class GraphStateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> internal co
         return transition
     }
 
-    fun with(init: GraphBuilder<STATE, EVENT, SIDE_EFFECT>.() -> Unit): StateMachine<STATE, EVENT, SIDE_EFFECT> {
-        return StateMachine.create(graph.copy(initialState = state), init)
-    }
-
     private fun STATE.getTransition(event: EVENT): StateMachine.Transition<STATE, EVENT, SIDE_EFFECT> {
         for ((eventMatcher, createTransitionTo) in getDefinition().transitions) {
             if (eventMatcher.matches(event)) {
