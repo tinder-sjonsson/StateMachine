@@ -2,6 +2,15 @@ package com.tinder
 
 import java.util.concurrent.atomic.AtomicReference
 
+fun <STATE : Any, EVENT : Any> transitionTo(
+    state: STATE,
+    event: EVENT? = null
+): Pair<STATE, EVENT?>? {
+    return Pair(state, event)
+}
+
+fun <STATE : Any, EVENT : Any> invalidTransition(): Pair<STATE, EVENT?>? = null
+
 interface StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> {
 
     val state: STATE
@@ -26,6 +35,23 @@ interface StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> {
     }
 
     companion object {
+
+        fun <STATE : Any, EVENT : Any, SIDE_EFFECT : Any> createSimple(
+            initialState: STATE,
+            onTransition: ((Transition<STATE, EVENT, SIDE_EFFECT>) -> Unit)? = null,
+            reducer: (STATE, EVENT) -> STATE?
+        ): StateMachine<STATE, EVENT, SIDE_EFFECT> {
+            return create(initialState, onTransition, { s, e -> reducer(s, e)?.let { it to null } })
+        }
+
+        fun <STATE : Any, EVENT : Any, SIDE_EFFECT : Any> create(
+            initialState: STATE,
+            onTransition: ((Transition<STATE, EVENT, SIDE_EFFECT>) -> Unit)? = null,
+            reducer: (STATE, EVENT) -> Pair<STATE, SIDE_EFFECT?>?
+        ): StateMachine<STATE, EVENT, SIDE_EFFECT> {
+            return NativeStateMachine(initialState, reducer, onTransition)
+        }
+
         fun <STATE : Any, EVENT : Any, SIDE_EFFECT : Any> create(
             init: GraphStateMachine.GraphBuilder<STATE, EVENT, SIDE_EFFECT>.() -> Unit
         ): StateMachine<STATE, EVENT, SIDE_EFFECT> {
@@ -38,6 +64,28 @@ interface StateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any> {
         ): StateMachine<STATE, EVENT, SIDE_EFFECT> {
             return GraphStateMachine(GraphStateMachine.GraphBuilder(graph).apply(init).build())
         }
+    }
+}
+
+class NativeStateMachine<STATE : Any, EVENT : Any, SIDE_EFFECT : Any>(
+    initialState: STATE,
+    private val reducer: (STATE, EVENT) -> Pair<STATE, SIDE_EFFECT?>?,
+    private val transitionListener: ((StateMachine.Transition<STATE, EVENT, SIDE_EFFECT>) -> Unit)?
+) : StateMachine<STATE, EVENT, SIDE_EFFECT> {
+
+    override var state: STATE = initialState
+        private set
+
+    override fun transition(event: EVENT): StateMachine.Transition<STATE, EVENT, SIDE_EFFECT> {
+        val transition: StateMachine.Transition<STATE, EVENT, SIDE_EFFECT> = synchronized(this) {
+            val fromState = state
+            reducer(fromState, event)?.let { (toState, sideEffect) ->
+                state = toState
+                StateMachine.Transition.Valid(fromState, event, toState, sideEffect)
+            } ?: StateMachine.Transition.Invalid(fromState, event)
+        }
+        transitionListener?.invoke(transition)
+        return transition
     }
 }
 
